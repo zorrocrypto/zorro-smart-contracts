@@ -63,6 +63,7 @@ contract ZorroStrategy {
         compoundingFrequencyDays = 30;
         // TODO: Set lpContracts for each strategy to begin with
         // TODO: Set ChainLink price feed contracts for each strategy to begin with
+        // TODO: Separate out this information for testnet vs mainnet
     }
 
     // State-changing methods
