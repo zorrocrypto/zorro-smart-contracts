@@ -2,7 +2,7 @@
 pragma solidity >=0.8.6 <0.9.0;
 
 // Dependencies
-// import "@chainlink/contracts/src/v0.6/interfaces/AggregatorV3Interface.sol";
+import "@chainlink/contracts/src/v0.6/interfaces/AggregatorV3Interface.sol";
 
 contract ZorroStrategy {
     /* Types */
