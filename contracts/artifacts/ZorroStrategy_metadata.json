@@ -1,6 +1,6 @@
 {
 	"compiler": {
-		"version": "0.8.6+commit.11564f7e"
+		"version": "0.6.4+commit.1dca32f3"
 	},
 	"language": "Solidity",
 	"output": {
@@ -46,6 +46,31 @@
 					},
 					{
 						"indexed": false,
+						"internalType": "uint256",
+						"name": "amountTotal",
+						"type": "uint256"
+					},
+					{
+						"indexed": false,
+						"internalType": "uint256",
+						"name": "liquidityEarned",
+						"type": "uint256"
+					}
+				],
+				"name": "AddedLiquidity",
+				"type": "event"
+			},
+			{
+				"anonymous": false,
+				"inputs": [
+					{
+						"indexed": false,
+						"internalType": "string",
+						"name": "strategy",
+						"type": "string"
+					},
+					{
+						"indexed": false,
 						"internalType": "address",
 						"name": "contractAddress",
 						"type": "address"
@@ -61,17 +86,8 @@
 				"type": "event"
 			},
 			{
-				"anonymous": false,
-				"inputs": [
-					{
-						"indexed": false,
-						"internalType": "uint256",
-						"name": "arrLength",
-						"type": "uint256"
-					}
-				],
-				"name": "TmpBeforeAppendToken",
-				"type": "event"
+				"stateMutability": "payable",
+				"type": "fallback"
 			},
 			{
 				"inputs": [
@@ -97,12 +113,22 @@
 					},
 					{
 						"internalType": "address",
-						"name": "priceFeedA",
+						"name": "priceFeedA1",
 						"type": "address"
 					},
 					{
 						"internalType": "address",
-						"name": "priceFeedB",
+						"name": "priceFeedA2",
+						"type": "address"
+					},
+					{
+						"internalType": "address",
+						"name": "priceFeedB1",
+						"type": "address"
+					},
+					{
+						"internalType": "address",
+						"name": "priceFeedB2",
 						"type": "address"
 					},
 					{
@@ -215,6 +241,25 @@
 			{
 				"inputs": [
 					{
+						"internalType": "address",
+						"name": "",
+						"type": "address"
+					}
+				],
+				"name": "liquidityTokenLedger",
+				"outputs": [
+					{
+						"internalType": "uint256",
+						"name": "",
+						"type": "uint256"
+					}
+				],
+				"stateMutability": "view",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
 						"internalType": "string",
 						"name": "",
 						"type": "string"
@@ -241,21 +286,6 @@
 						"internalType": "address",
 						"name": "tokenB",
 						"type": "address"
-					},
-					{
-						"internalType": "address",
-						"name": "pricefeedA",
-						"type": "address"
-					},
-					{
-						"internalType": "address",
-						"name": "pricefeedB",
-						"type": "address"
-					},
-					{
-						"internalType": "enum ZorroStrategy.PriceCalculationMethod",
-						"name": "priceCalculationMethod",
-						"type": "uint8"
 					}
 				],
 				"stateMutability": "view",
@@ -269,25 +299,6 @@
 						"internalType": "uint8",
 						"name": "",
 						"type": "uint8"
-					}
-				],
-				"stateMutability": "view",
-				"type": "function"
-			},
-			{
-				"inputs": [
-					{
-						"internalType": "address",
-						"name": "",
-						"type": "address"
-					}
-				],
-				"name": "priceFeedMaps",
-				"outputs": [
-					{
-						"internalType": "address",
-						"name": "",
-						"type": "address"
 					}
 				],
 				"stateMutability": "view",
@@ -327,6 +338,19 @@
 			{
 				"inputs": [
 					{
+						"internalType": "uint256",
+						"name": "reserveAmount",
+						"type": "uint256"
+					}
+				],
+				"name": "setFeesReserve",
+				"outputs": [],
+				"stateMutability": "nonpayable",
+				"type": "function"
+			},
+			{
+				"inputs": [
+					{
 						"internalType": "uint8",
 						"name": "feePct",
 						"type": "uint8"
@@ -353,21 +377,17 @@
 			}
 		],
 		"devdoc": {
-			"kind": "dev",
-			"methods": {},
-			"version": 1
+			"methods": {}
 		},
 		"userdoc": {
-			"kind": "user",
-			"methods": {},
-			"version": 1
+			"methods": {}
 		}
 	},
 	"settings": {
 		"compilationTarget": {
 			"Users/kristophm/workspace/crypto/zorro/zorro-truffle/contracts/ZorroStrategy.sol": "ZorroStrategy"
 		},
-		"evmVersion": "berlin",
+		"evmVersion": "istanbul",
 		"libraries": {},
 		"metadata": {
 			"bytecodeHash": "ipfs"
@@ -379,12 +399,39 @@
 		"remappings": []
 	},
 	"sources": {
-		"Users/kristophm/workspace/crypto/zorro/zorro-truffle/contracts/ZorroStrategy.sol": {
-			"keccak256": "0xb96786b9a98f8815bd5d0ce021662cae7b907c7958d1a695a8bb77e0df3ab71f",
-			"license": "UNLICENSED",
+		"@chainlink/contracts/src/v0.6/interfaces/AggregatorV3Interface.sol": {
+			"keccak256": "0x8895ce4f46aba18ee3cdb7b1d180f79edb868225781f60993c7b2181e2ee2583",
 			"urls": [
-				"bzz-raw://223625ce5e52ac29cc9502170faf7f70a3e0aaf8219fba2e079d10fbb136ef61",
-				"dweb:/ipfs/QmUhwYmMqFMuH392gMPcAf6dTRo5m54AuNtCagvvtJYte7"
+				"bzz-raw://4472c14df5f311d7a2eff1dfa55d9b4d39a21b0a0ff905fcbbf6913551086a4c",
+				"dweb:/ipfs/QmQvwFk1SBaLMm4pmZCz7UEhfaXM8kUWu5VG71VFFuMxjF"
+			]
+		},
+		"Users/kristophm/workspace/crypto/zorro/zorro-truffle/contracts/ZorroStrategy.sol": {
+			"keccak256": "0x31655d8db14907b7543e193b36dd72ec2abdec5a74dfaa266b8f6c970beb60ad",
+			"urls": [
+				"bzz-raw://413971d905be14adfaf664f6f8e8a5e986feb0850b610f1cf9b7335416b58265",
+				"dweb:/ipfs/QmP8Bqf5aYvc7zS6HGMaSybTQaBwZ3LhM4XFAXhuBMEfjH"
+			]
+		},
+		"Users/kristophm/workspace/crypto/zorro/zorro-truffle/contracts/interfaces/IBEP20.sol": {
+			"keccak256": "0x1466ba22461d84dbe68084723e4faf2b1a2aecabdf9b54cb532cbc38200ae74c",
+			"urls": [
+				"bzz-raw://ea60fdada0a3ca0fa073d55bb3864e5980592469d8efe84db3fc104cd598132c",
+				"dweb:/ipfs/QmSVg74Pq9icQfuTB6fsRZkeF9E9CeNDDGTnHLEiN5waCd"
+			]
+		},
+		"Users/kristophm/workspace/crypto/zorro/zorro-truffle/contracts/interfaces/IPancakeRouter01.sol": {
+			"keccak256": "0x6c958d15da70bdb0c47d12855a83b40c39c08c904eb3fbaa6ec8e3b09d976b5b",
+			"urls": [
+				"bzz-raw://a6fea7bb53dc451a00226e2aba5ad30fa70f54d942035b8b117291b4a32c6e3d",
+				"dweb:/ipfs/QmPtm1YESScTqvVPDtR5MkHAoyihPEZ8u582WxRRNcftYY"
+			]
+		},
+		"Users/kristophm/workspace/crypto/zorro/zorro-truffle/contracts/interfaces/IPancakeRouter02.sol": {
+			"keccak256": "0xfff0ae532ac163b28dab47fb332249f5094caf87e0bfe1089b28de44a5d6f97c",
+			"urls": [
+				"bzz-raw://2ff9cfe8b5df0e076eb3035bbfa4ced175334f4d4d3fc6eefb53e8f684f9ef32",
+				"dweb:/ipfs/QmPw9R9eoUwubWyPJw9ku5y9gDnGw6fALtmD4a4DEbf5FV"
 			]
 		}
 	},

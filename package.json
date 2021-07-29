@@ -1,0 +1,27 @@
+{
+  "name": "zorro-truffle",
+  "version": "1.0.0",
+  "description": "Zorro smart contracts and libraries",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "test ."
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zorrocrypto/zorro-smart-contracts.git"
+  },
+  "keywords": [
+    "solidity"
+  ],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/zorrocrypto/zorro-smart-contracts/issues"
+  },
+  "homepage": "https://github.com/zorrocrypto/zorro-smart-contracts#readme",
+  "dependencies": {
+    "@chainlink/contracts": "^0.2.1"
+  }
+}
