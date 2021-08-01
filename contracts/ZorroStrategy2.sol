@@ -173,7 +173,7 @@ contract ZorroStrategy is IZorroStrategy, IBEP20 {
 
     function withdraw(address to) external {
         // TODO: Any withdrawal methods in the IBEP20 interface need to first extract a profit
-
+        
     }
 
     // BEP20 event implementations
