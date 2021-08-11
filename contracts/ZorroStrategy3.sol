@@ -161,7 +161,43 @@ contract ZorroStrategy {
         IPancakeswapFarm(masterChefAddress).deposit(pid, lpTokenAmt);
     }
 
-    
+    function _unfarm(uint256 _lpTokenAmt) internal virtual {
+        IPancakeswapFarm(masterChefAddress).withdraw(pid, _lpTokenAmt);
+    }
+
+    function withdraw(address _userAddress, uint256 _lpTokenAmt)
+        public
+        virtual
+        onlyOwner
+        nonReentrant
+        returns (uint256)
+    {
+        require(_lpTokenAmt > 0, "_lpTokenAmt <= 0");
+
+        uint256 sharesRemoved = _lpTokenAmt.mul(sharesTotal).div(lpTokensLockedTotal);
+        if (sharesRemoved > sharesTotal) {
+            sharesRemoved = sharesTotal;
+        }
+        sharesTotal = sharesTotal.sub(sharesRemoved);
+
+        _unfarm(_lpTokenAmt);
+
+        uint256 lpTokenAmt = IERC20(wantAddress).balanceOf(address(this));
+        if (_lpTokenAmt > lpTokenAmt) {
+            _lpTokenAmt = lpTokenAmt;
+        }
+
+        if (lpTokensLockedTotal < _lpTokenAmt) {
+            _lpTokenAmt = lpTokensLockedTotal;
+        }
+
+        lpTokensLockedTotal = lpTokensLockedTotal.sub(_lpTokenAmt);
+
+        // Must have a way of verifying this is the correct recipient and is entitled to these funds
+        IERC20(pancakePairAddress).safeTransfer(msg.sender, _lpTokenAmt);
+
+        return sharesRemoved;
+    }
 
     function earn() {
 
