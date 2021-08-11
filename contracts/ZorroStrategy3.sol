@@ -1,3 +1,25 @@
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.6.12;
+
+import "./helpers/ERC20.sol";
+import "./libraries/Address.sol";
+import "./libraries/SafeERC20.sol";
+import "./libraries/EnumerableSet.sol";
+import "./helpers/Ownable.sol";
+import "./interfaces/IPancakeswapFarm.sol";
+import "./interfaces/IPancakeRouter01.sol";
+import "./interfaces/IPancakeRouter02.sol";
+
+interface IWBNB is IERC20 {
+    function deposit() external payable;
+
+    function withdraw(uint256 wad) external;
+}
+
+import "./helpers/ReentrancyGuard.sol";
+import "./helpers/Pausable.sol";
+
 contract ZorroStrategy {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
@@ -10,7 +32,7 @@ contract ZorroStrategy {
 
     // Variables
     uint256 public pid; // pid of pool in masterChefAddress
-    address public pancakePairAddress;
+    address public pancakePairAddress; // Used to be "wantAddress"
     address public token0Address;
     address public token1Address;
 
@@ -43,19 +65,105 @@ contract ZorroStrategy {
     address[] public token1ToCakePath;
 
     // Constructor
-    constructor() {
+    constructor(
+        address[] memory _addresses,
+        uint256 _pid,
+        address[] memory _cakeToToken0Path,
+        address[] memory _cakeToToken1Path,
+        address[] memory _token0ToCakePath,
+        address[] memory _token1ToCakePath,
+        uint256 _controllerFee,
+        uint256 _entranceFeeFactor
+    ) public {
+        wbnbAddress = _addresses[0];
+        govAddress = _addresses[1];
+        pancakePairAddress = _addresses[2];
+        token0Address = _addresses[3];
+        token1Address = _addresses[4];
+        pancakeRouterAddress = _addresses[5];
+        rewardsAddress = _addresses[6];
 
+        pid = _pid;
+
+        cakeToToken0Path = _cakeToToken0Path;
+        cakeToToken1Path = _cakeToToken1Path;
+        token0ToCakePath = _token0ToCakePath;
+        token1ToCakePath = _token1ToCakePath;
+
+        controllerFee = _controllerFee;
+        buyBackRate = _buyBackRate;
+        entranceFeeFactor = _entranceFeeFactor;
+
+        transferOwnership(msg.sender);
     }
 
-    function deposit(uint256 _amount) public {
-        // Transfer from 
+    // Events
+    event SetSettings(
+        uint256 _entranceFeeFactor,
+        uint256 _controllerFee,
+        uint256 _slippageFactor
+    );
+    event SetGov(address _govAddress);
+    event SetOnlyGov(bool _onlyGov);
+    event SetUniRouterAddress(address _uniRouterAddress);
+    event SetBuyBackAddress(address _buyBackAddress);
+    event SetRewardsAddress(address _rewardsAddress);
+
+    // Modifiers
+    modifier onlyAllowGov() {
+        require(msg.sender == govAddress, "!gov");
+        _;
     }
+
+    // Receives new deposits from user
+    function deposit(uint256 _lpTokenAmt)
+        public
+        virtual
+        onlyOwner
+        nonReentrant
+        whenNotPaused
+        returns (uint256)
+    {
+        IERC20(pancakePairAddress).safeTransferFrom(
+            address(msg.sender),
+            address(this),
+            _lpTokenAmt
+        );
+
+        // First depositor gets shares added equal to the number of LP tokens deposited
+        uint256 sharesAdded = _lpTokenAmt;
+        // All subsequent depositors get shares added equal to the number of LP tokens
+        // deposited, minus entranceFee for security
+        if (lpTokensLockedTotal > 0 && sharesTotal > 0) {
+            sharesAdded = _lpTokenAmt
+                .mul(sharesTotal)
+                .mul(entranceFeeFactor)
+                .div(lpTokensLockedTotal)
+                .div(entranceFeeFactorMax);
+        }
+        // Increment the total number of shares by sharesAdded
+        sharesTotal = sharesTotal.add(sharesAdded);
+
+        _farm();
+
+        return sharesAdded;
+    }
+
+    function farm() public virtual nonReentrant {
+        _farm();
+    }
+
+    function _farm() internal virtual {
+        uint256 lpTokenAmt = IERC20(pancakePairAddress).balanceOf(address(this));
+        lpTokensLockedTotal = lpTokensLockedTotal.add(lpTokenAmt);
+        IERC20(pancakePairAddress).safeIncreaseAllowance(masterChefAddress, lpTokenAmt);
+
+        IPancakeswapFarm(masterChefAddress).deposit(pid, lpTokenAmt);
+    }
+
+    
 
     function earn() {
-
-    }
-
-    function withdraw() {
 
     }
 }
