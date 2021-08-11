@@ -9,7 +9,11 @@ import "./interfaces/IPancakePair.sol";
 import "./interfaces/IZorroStrategy.sol";
 import './libraries/SafeMath.sol';
 
+
 contract ZorroStrategy is IZorroStrategy, IBEP20 {
+    // TODO: Replace w/ SafeMath operations everywhere
+    using SafeMath  for uint;
+
     /* Types */
     enum PriceCalculationMethod {
         AOnly,
@@ -31,12 +35,25 @@ contract ZorroStrategy is IZorroStrategy, IBEP20 {
     /* Variables */
     // Core contract
     address[] public activeAccounts;
+    IPancakePair public lpContract;
     TokenMeta public tokenMetaA;
     TokenMeta public tokenMetaB;
+    address public tokenA;
+    address public tokenB;
     // TODO - this needs to be adjustable
-    uint8 public slippageTolerancePct = 1;
+    uint public slippageTolerancePct = 1;
     // TODO - fill this amount in, allow owner to change?
     uint256 public constant investmentGasFee = 5 gwei;
+
+    // Performance
+    // TODO - allow this to be reset
+    uint public zorroPerformanceFeePct = 25;
+    // TODO - allow this to be reset
+    uint public minProfitTakingIntervalSecs;
+    uint public tokenARewards;
+    uint public tokenBRewards;
+    uint public lastEarningTime;
+    
 
     // BEP-20 variable implementations
     string public name;
@@ -47,8 +64,8 @@ contract ZorroStrategy is IZorroStrategy, IBEP20 {
     mapping(address => mapping(address => uint)) public allowance;
 
     /* Events */
-    event InvestmentComplete(address _owner, uint256 _value);
-
+    event InvestmentComplete(address _sender, uint256 _value);
+    event WithdrawalComplete(address _recipient, uint256 _value);
 
     /* Modifiers */
     modifier ownerOnly {
@@ -63,10 +80,12 @@ contract ZorroStrategy is IZorroStrategy, IBEP20 {
         address _priceFeedB0, address _priceFeedB1, uint _priceCalcMethodB, 
         string _name, string _symbol, uint8 _decimals) public {
         owner = msg.sender;
-        lpContract = IPancakeRouter02(_lpContractAddress);
+        lpContract = IPancakePair(_lpContractAddress);
 
         tokenMetaA = TokenMeta(AggregatorV3Interface(_priceFeedA0), AggregatorV3Interface(_priceFeedA1), PriceCalculationMethod(_priceCalcMethodA));
         tokenMetaB = TokenMeta(AggregatorV3Interface(_priceFeedB0), AggregatorV3Interface(_priceFeedB1), PriceCalculationMethod(_priceCalcMethodB));
+        tokenA = lpContract.token0();
+        tokenB = lpContract.token1();
 
         name = _name;
         symbol = _symbol;
@@ -74,11 +93,37 @@ contract ZorroStrategy is IZorroStrategy, IBEP20 {
     }
 
     // Functions
-    function compoundInvestments() external ownerOnly {
+    function compoundInvestments(address[] calldata wallets) external ownerOnly {
+        // Reinvests yield farm earnings back into protocol
+
+        // Compare current total rewards against last total rewards
+        
+        // If there is a profit, remove associated reward amount. If not, skip
+        // Extract performance fee
+        // Subtract reward
+        // Remove liquidity
+        // Reinvest remainder
+        // Mark last total reward and time on the ledger 
+
+        // -- OLD -- 
         // Iterates through all active customer wallets and compounds their investments while taking a fee
+        // TODO - Prevent this function from being run too often and consuming too much gas. 
+        // Get underlying token supplies
+        uint totalSupplyA = IBEP20(tokenA).totalSupply();
+        uint totalSupplyB = IBEP20(tokenB).totalSupply();
+        uint balance0 = IBEP20(tokenA).balanceOf(address(this));
+        uint balance1 = IBEP20(tokenB).balanceOf(address(this));
+
         // Iterate through wallets
-        // Calculate amounts of tokens A, B based on current liquidity amount 
-        // Compare amounts for underlying tokens A, B to last profit taking event time
+        for (uint i=0;i<wallets.length;i++) {
+            address wallet = wallets[i];
+            // Calculate amounts of tokens A, B based on current liquidity amount 
+            uint liquidity = balanceOf[wallet];
+            uint amount0 = liquidity.mul(balance0) / totalSupplyA;
+            uint amount1 = liquidity.mul(balance1) / totalSupplyB;
+            // Compare amounts for underlying tokens A, B to last profit taking event time
+
+        }
         // If a profit was made, remove liquidity. If not, continue to next wallet (do nothing)
         // Profit calculation must account for cash flows since last profit taking period
         // Take Zorro fee as a percentage of profits and send this to the Zorro wallet
@@ -102,8 +147,6 @@ contract ZorroStrategy is IZorroStrategy, IBEP20 {
         // Transfer amount of BUSDC, minus gas (estimated gas value that can be set by owner)
         BUSDC.transferFrom(msg.sender, address(this), amountUSDC);
         // Trigger swaps for each currency in the pair
-        address tokenA = lpContract.token0();
-        address tokenB = lpContract.token1();
         // Collect fees for network/gas charges that Zorro fronted
         // TODO - consider the ability to waive or reduce these fees for large investments etc. 
         // Convert BNB to USDC equivalent and subtract this and submit to Zorro to compensate for gas fees. 
@@ -171,9 +214,44 @@ contract ZorroStrategy is IZorroStrategy, IBEP20 {
         return price;
     }
 
-    function withdraw(address to) external {
+    function withdraw(address to, uint256 liquidity, uint256 amountAMinBeforeFees, uint256 amountBMinBeforeFees) external {
+        /* Removes liquidity, consolidates to USDC, and transfer to recipient address specified */
+        // TODO: Consider if there's a way to avoid having to input amountAMinBeforeFees, and B, by using an Oracle etc. 
         // TODO: Any withdrawal methods in the IBEP20 interface need to first extract a profit
-        
+        // TODO: Make sure only true owner of LP tokens can withdraw their money
+        // Burn Zorro LP token
+        _burn(msg.sender, liquidity);
+        // Remove liquidity
+        (uint amountAReceived, uint amountBReceived) = routerContract.removeLiquidity(tokenA, tokenB, liquidity, amountAMinBeforeFees, amountBMinBeforeFees, address(this), block.timestamp);
+        // Take fee - TODO - send to wallet too? 
+        uint amountAAfterFee = amountAReceived * (100 - zorroPerformanceFeePct) / 100;
+        uint amountBAfterFee = amountBReceived * (100 - zorroPerformanceFeePct) / 100;
+
+        // Consolidate to USDC if not already USDC
+        uint256 amountAInUSDC = 0;
+        uint256 amountBInUSDC = 0;
+        if (tokenA != address(BUSDC)) {
+            amountAInUSDC = amountAAfterFee;
+        } else {
+            address[] pathA = new address[](2);
+            pathA[0] = tokenA;
+            pathA[1] = address(BUSDC);
+            uint amountOutMinA = getLatestPriceForToken(tokenMetaA) * (100 - slippageTolerancePct) / 100;
+            amountAInUSDC = routerContract.swapExactTokensForTokens(amountAAfterFee, amountOutMinA, pathA, address(this), block.timestamp)[1];
+        }
+        if (tokenB != address(BUSDC)) {
+            amountAInUSDC = amountAAfterFee;
+        } else {
+            address[] pathB = new address[](2);
+            pathB[0] = tokenB;
+            pathB[1] = address(BUSDC);
+            uint amountOutMinB = getLatestPriceForToken(tokenMetaB) * (100 - slippageTolerancePct) / 100;
+            amountBInUSDC = routerContract.swapExactTokensForTokens(amountBAfterFee, amountOutMinB, pathB, address(this), block.timestamp)[1];
+        }
+        // Transfer to recipient
+        uint totalInUSDC = amountAInUSDC + amountBInUSDC;
+        BUSDC.transfer(msg.sender, totalInUSDC);
+        emit WithdrawalComplete(msg.sender, totalInUSDC);
     }
 
     // BEP20 event implementations
