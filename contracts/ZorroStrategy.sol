@@ -1,329 +1,494 @@
-// SPDX-License-Identifier: UNLICENSED
-pragma solidity >=0.6.2 <0.9.0;
+// SPDX-License-Identifier: MIT
 
-// Dependencies
-import "@chainlink/contracts/src/v0.6/interfaces/AggregatorV3Interface.sol";
-import "./interfaces/IBEP20.sol";
+pragma solidity 0.6.12;
+
+import "./helpers/ERC20.sol";
+import "./libraries/Address.sol";
+import "./libraries/SafeERC20.sol";
+import "./libraries/EnumerableSet.sol";
+import "./helpers/Ownable.sol";
+import "./interfaces/IPancakeswapFarm.sol";
+import "./interfaces/IPancakeRouter01.sol";
 import "./interfaces/IPancakeRouter02.sol";
 
+interface IWBNB is IERC20 {
+    function deposit() external payable;
+
+    function withdraw(uint256 wad) external;
+}
+
+import "./helpers/ReentrancyGuard.sol";
+import "./helpers/Pausable.sol";
+
 contract ZorroStrategy {
-    /* Types */
-    enum PriceCalculationMethod {
-        AOnly,
-        AInverse,
-        AMultipliedByB,
-        ADividedByB
+    using SafeMath for uint256;
+    using SafeERC20 for IERC20;
+
+    // Constants
+    address public constant cakeTokenAddress = "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82";
+    address public constant pancakeRouterAddress = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
+    address public constant wbnbAddress = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
+    address public constant masterChefAddress = "0x73feaa1ee314f8c655e354234017be2193c9e24e";
+
+    // Variables
+    uint256 public pid; // pid of pool in masterChefAddress
+    address public pancakePairAddress; // Used to be "wantAddress"
+    address public token0Address;
+    address public token1Address;
+    // Ledger
+    mapping(address => uint256) public sharesLedger; //(account address => amount)
+
+    address public govAddress; // Timelock contract
+    bool public onlyGov = true; // If true, only allows governor address (Timelock contract) to perform actions
+
+    uint256 public lastEarnBlock = 0;
+    uint256 public lpTokensLockedTotal = 0; // Used to be "wantLockedTotal"
+    uint256 public sharesTotal = 0;
+
+    // Performance fees
+    uint256 public controllerFee = 0; // 100 = 1%
+    uint256 public constant controllerFeeMax = 10000; 
+    uint256 public constant controllerFeeUL = 5000; // (UL = "upper limit")
+    address public rewardsAddress; // Where to send performance fees to
+
+    // TODO - understand front running and how AUTO do this better
+    uint256 public entranceFeeFactor = 9990; // < 0.1% entrance fee - goes to pool + prevents front-running
+    uint256 public constant entranceFeeFactorMax = 10000;
+    uint256 public constant entranceFeeFactorLL = 9950; // 0.5% is the max entrance fee settable. LL = lowerlimit
+
+    // Slippage
+    uint256 public slippageFactor = 950; // 5% default slippage tolerance
+    uint256 public constant slippageFactorUL = 995;
+
+    // Swap routing
+    address[] public cakeToToken0Path;
+    address[] public cakeToToken1Path;
+    address[] public token0ToCakePath;
+    address[] public token1ToCakePath;
+
+    // Constructor
+    constructor(
+        address[] memory _addresses,
+        uint256 _pid,
+        address[] memory _cakeToToken0Path,
+        address[] memory _cakeToToken1Path,
+        address[] memory _token0ToCakePath,
+        address[] memory _token1ToCakePath,
+        uint256 _controllerFee,
+        uint256 _entranceFeeFactor
+    ) public {
+        wbnbAddress = _addresses[0];
+        govAddress = _addresses[1];
+        pancakePairAddress = _addresses[2];
+        token0Address = _addresses[3];
+        token1Address = _addresses[4];
+        pancakeRouterAddress = _addresses[5];
+        rewardsAddress = _addresses[6];
+
+        pid = _pid;
+
+        cakeToToken0Path = _cakeToToken0Path;
+        cakeToToken1Path = _cakeToToken1Path;
+        token0ToCakePath = _token0ToCakePath;
+        token1ToCakePath = _token1ToCakePath;
+
+        controllerFee = _controllerFee;
+        buyBackRate = _buyBackRate;
+        entranceFeeFactor = _entranceFeeFactor;
+
+        transferOwnership(msg.sender);
     }
-    struct LPContract {
-        address ammContractAddress;
-        address tokenA;
-        address tokenB;
-    }
-    struct TokenMeta {
-        AggregatorV3Interface priceFeedA;
-        AggregatorV3Interface priceFeedB;
-        PriceCalculationMethod priceCalculationMethod;
-        bool initialized;
-
-    }
-    /* Constants */
-    IPancakeRouter02 router = IPancakeRouter02(0x10ED43C718714eb63d5aA57B78B54704E256024E);
-    // TODO - Make absolutely certain is the correct USDC. There seem to be many.
-    IBEP20 USDC = IBEP20(0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d);
-
-    
-    /* Variables */
-    // Key addresses / ownership
-    address owner;
-    // Strategies
-    mapping(string => LPContract[]) public lpContracts;
-    // Price feed (Chainlink)
-    mapping(address => TokenMeta) internal tokenMetaInfo;
-    AggregatorV3Interface priceFeedBNBUSD = AggregatorV3Interface(0x0567F2323251f0Aab15c8dFb1967E4e8A7D42aeE);
-    // Balances of wallets by address, by token
-    mapping(address => mapping(address => uint)) public bep20TokenBalances;
-    // Array of all Zorro wallets
-    address[] public wallets;
-
-
-    // Financial paramters
-    uint16 public compoundingFrequencyDays;
-    uint8 public performanceFeePercent;
-    uint8 slippageTolerancePercent = 1;
-    uint256 reservesForFeesETH = 18 finney; // About $5 in BNB at time of writing
-    
-    // Accounting
-    mapping(address => uint256) public liquidityTokenLedger;
-    mapping(address => uint256) public lastFeeTakenAmount;
-    mapping(address => uint64) public lastFeeTakenAt;
-    mapping(address => uint256) public lastProfitAmountPreFees;
 
     // Events
-    event AddedContract(string strategy, address contractAddress, uint numContractsInStrategy);
-    event RemovedContract(string strategy, address contractAddress, uint numContractsInStrategy);
-    event AddedLiquidity(string strategy, uint256 amountTotal, uint256 liquidityEarned);
+    event SetSettings(
+        uint256 _entranceFeeFactor,
+        uint256 _controllerFee,
+        uint256 _slippageFactor
+    );
+    event SetGov(address _govAddress);
+    event SetOnlyGov(bool _onlyGov);
+    event SetPancakeRouterAddress(address _uniRouterAddress);
+    event SetRewardsAddress(address _rewardsAddress);
+
+    event Deposit(address indexed user, uint256 indexed pid, uint256 amount);
+    event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
+    event EmergencyWithdraw(
+        address indexed user,
+        uint256 indexed pid,
+        uint256 amount
+    );
 
     // Modifiers
-    modifier onlyOwner {
-        require(msg.sender == owner, "Only the owner of this contract can perform this action.");
+    modifier onlyAllowGov() {
+        require(msg.sender == govAddress, "!gov");
         _;
     }
 
-    // Constructor
-    constructor () public {
-        // Mark owner of the contract
-        owner = msg.sender;
-        // Set initial fee-taking parameters
-        performanceFeePercent = 30;
-        compoundingFrequencyDays = 30;
-        // TODO: Set lpContracts for each strategy to begin with
-        lpContracts["stablecoin"].push(LPContract(0xEc6557348085Aa57C72514D67070dC863C0a5A8c, 0x55d398326f99059fF775485246999027B3197955, 0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d));
-        // TODO: Set ChainLink price feed contracts for each strategy to begin with
-        tokenMetaInfo[0x55d398326f99059fF775485246999027B3197955] = TokenMeta(AggregatorV3Interface(0xB97Ad0E74fa7d920791E90258A6E2085088b4320), AggregatorV3Interface(0x51597f405303C4377E36123cBc172b13269EA163), PriceCalculationMethod(0), true);
-        // TODO: Separate out this information for testnet vs mainnet
-        // TODO: ETH terminology is confusing.
+    function deposit(uint256 _lpTokenAmt) public nonReentrant {
+        if (_lpTokenAmt > 0) {
+            uint256 sharesAdded = _deposit(msg.sender, _lpTokenAmt);
+            sharesLedger[msg.sender] = sharesLedger[msg.sender].add(sharesAdded);
+        }
+        emit Deposit(msg.sender, pid, _lpTokenAmt);
     }
 
-    // State-changing methods
-    function invest(string calldata strategy, address customerWallet, uint investmentAmountUSD) external {
-        // TODO - Make sure to use safe maths library
+    // Receives new deposits
+    function _deposit(uint256 _lpTokenAmt)
+        public
+        virtual
+        onlyOwner
+        nonReentrant
+        whenNotPaused
+        returns (uint256)
+    {
+        IERC20(pancakePairAddress).safeTransferFrom(
+            address(msg.sender),
+            address(this),
+            _lpTokenAmt
+        );
 
-        /*
-        - Swap a small amount of Binance USDC to BNB and send to Zorro to pay for gas fees
-        - Add customer wallet to wallets array
-        - Iterate through all LP contracts in the specified strategy and calculate the required allocation for each token
-        - - Swap as necessary to get all the required tokens, w/ destination address of swap being Zorro
-        - Add liquidity to each contract
-        - - Update the ledger of this contract to reflect liquidity balances
-        */
-
-
-        uint256 grossAllocatableFunds = msg.value; // Does not include fees yet
-        uint256 netAllocatableFundsETH = grossAllocatableFundsETH - reservesForFeesETH;
-        // Requirements
-        require(msg.value > 0, "Message must have a value greater than 0");
-
-        // Prep variables
-        LPContract[] memory strategyContracts = lpContracts[strategy]; 
-        address[] memory allocatableTokens = new address[](strategyContractsLength * 2);
-        uint256[] memory allocatableFundsByTokenBNB = new uint256[](strategyContractsLength * 2);
-        int latestBNBPrice = getLatestPrice(priceFeedBNBUSD);
-        
-        // Add wallet if does not exist
-        bool walletDoesExist = false;
-        for (uint i=0; i<wallets.length; i++) {
-            if (wallets[i] == msg.sender) {
-                walletDoesExist = true;
-                break;
-            }
+        // First depositor gets shares added equal to the number of LP tokens deposited
+        uint256 sharesAdded = _lpTokenAmt;
+        // TODO need to understand better how the front running attack works and how the deposit fee helps
+        // All subsequent depositors get shares added equal to the number of LP tokens
+        // deposited, minus entranceFee for security, paid to existing vault users
+        if (lpTokensLockedTotal > 0 && sharesTotal > 0) {
+            sharesAdded = _lpTokenAmt
+                .mul(sharesTotal)
+                .mul(entranceFeeFactor)
+                .div(lpTokensLockedTotal)
+                .div(entranceFeeFactorMax);
         }
-        if (!walletDoesExist) {
-            wallets.push(msg.sender);
-        }
-        
-        // Determine the amount of each token to allocate. (2 tokens per pair)
-        uint256 allocationAmountPerTokenBNB = (netAllocatableFundsBNB / (strategyContracts.length * 2));
+        // Increment the total number of shares by sharesAdded
+        sharesTotal = sharesTotal.add(sharesAdded);
 
-        // Iterates through accepted LP contracts for this strategy
-        for (uint16 i=0;i<strategyContracts.length;i++) {
-            // Determine indexes for each token in pair
-            LPContract memory strategyContract = strategyContracts[i];
-            int16 tokenAIndex = -1;
-            int16 tokenBIndex = -1;
-            for (uint16 j=0;j<allocatableTokens.length;j++) {
-                if (allocatableTokens[j] == strategyContract.tokenA) {
-                    tokenAIndex = int16(j);
-                } else if (allocatableTokens[j] == strategyContract.tokenB) {
-                    tokenBIndex = int16(j);
-                }
-            }
-            
-            // Update allocatable funds for each token
-            int16 latestUpdatedIndexA = -1;
-            int16 latestUpdatedIndexB = -1;
-            if (tokenAIndex >= 0) {
-                // If token is already present, increment the allocatable amount for that token
-                allocatableFundsByTokenETH[uint16(tokenAIndex)] += allocationAmountPerTokenETH;
+        _farm();
+
+        return sharesAdded;
+    }
+
+    function farm() public virtual nonReentrant {
+        _farm();
+    }
+
+    function _farm() internal virtual {
+        uint256 lpTokenAmt = IERC20(pancakePairAddress).balanceOf(address(this));
+        lpTokensLockedTotal = lpTokensLockedTotal.add(lpTokenAmt);
+        IERC20(pancakePairAddress).safeIncreaseAllowance(masterChefAddress, lpTokenAmt);
+
+        IPancakeswapFarm(masterChefAddress).deposit(pid, lpTokenAmt);
+    }
+
+    function _unfarm(uint256 _lpTokenAmt) internal virtual {
+        IPancakeswapFarm(masterChefAddress).withdraw(pid, _lpTokenAmt);
+    }
+
+    function withdraw(uint256 _pid, uint256 _lpTokenAmt) public nonReentrant {
+        require(sharesLedger[msg.sender] > 0, "user shares is 0");
+        require(sharesTotal > 0, "sharesTotal is 0");
+
+        // Withdraw LP tokens
+        uint256 amount = sharesLedger[msg.sender].mul(lpTokensLockedTotal).div(sharesTotal);
+        if (_lpTokenAmt > amount) {
+            _lpTokenAmt = amount;
+        }
+        if (_lpTokenAmt > 0) {
+            uint256 sharesRemoved = _withdraw(msg.sender, _lpTokenAmt);
+            // TODO - since we're updating state after the call above, is this vulnerable to reentrancy? Check for deposit() also.
+            if (sharesRemoved > sharesLedger[msg.sender]) {
+                sharesLedger[msg.sender] = 0;
             } else {
-                // If token is not present in allocations array yet, append its address and allocatable amount
-                allocatableTokens[uint16(latestUpdatedIndexA + 1)] = strategyContract.tokenA;
-                allocatableFundsByTokenETH[uint16(latestUpdatedIndexA + 1)] = allocationAmountPerTokenETH;
-            }
-            if (tokenBIndex >= 0) {
-                // If token is already present, increment the allocatable amount for that token
-                allocatableFundsByTokenETH[uint16(tokenBIndex)] += allocationAmountPerTokenETH;
-            } else {
-                // If token is not present in allocations array yet, append its address and allocatable amount
-                allocatableTokens[uint16(latestUpdatedIndexB + 1)] = strategyContract.tokenB;
-                allocatableFundsByTokenETH[uint16(latestUpdatedIndexB + 1)] = allocationAmountPerTokenETH;
+                sharesLedger[msg.sender] = sharesLedger[msg.sender].sub(sharesRemoved);
             }
         }
-        
-        // Iterate through all allocatableTokens and swap to obtain proper allocations
-        for (uint16 i=0;i<allocatableTokens.length;i++) {
-            address token = allocatableTokens[i];
-            if (token == address(USDC)) {
-                // We already have USDC, skip
-                continue;
-            }
-            uint256 amountInETH = allocatableFundsByTokenETH[i];
-            TokenMeta memory tokenMeta = tokenMetaInfo[token];
-            // Use Chainlink as oracle to get fair pricing
-            int latestTokenPriceUSD = getLatestPriceForToken(tokenMeta);
-            uint256 amountInUSD = amountInETH * uint(latestETHPrice);
-            
-            // Approve transaction for BEP20 token
-            // TODO - approval only needs to be done once, upon first investment
-            require(USDC.approve(address(router), amountInUSD), "Approval by router failed");
-            // Perform swap
-            address[] memory path = new address[](2);
-            path[0] = address(USDC);
-            path[1] = token;
-            // Calculate min output amount, accounting for slippage tolerance
-            uint256 amountOutMin = (amountInUSD / uint(latestTokenPriceUSD)) * ((100 - slippageTolerancePercent)/100);
-            uint256[] memory amounts = router.swapExactTokensForTokens(amountInUSD, amountOutMin, path, msg.sender, block.timestamp);
+        emit Withdraw(msg.sender, pid, _lpTokenAmt);
+    }
+
+    // TODO Check visibility of these functions (private vs. public) etc.
+    function _withdraw(address _userAddress, uint256 _lpTokenAmt)
+        public
+        virtual
+        onlyOwner
+        nonReentrant
+        returns (uint256)
+    {
+        require(_lpTokenAmt > 0, "_lpTokenAmt <= 0");
+
+        uint256 sharesRemoved = _lpTokenAmt.mul(sharesTotal).div(lpTokensLockedTotal);
+        if (sharesRemoved > sharesTotal) {
+            sharesRemoved = sharesTotal;
         }
-        
-        // Iterates through each LP contract and add liquidity
-        for (uint16 i=0;i<strategyContracts.length;i++) {
-            LPContract memory strategyContract = strategyContracts[i];
-            // Get latest prices from oracles and calculate fair exchange rates 
-            TokenMeta memory tokenMetaA = tokenMetaInfo[strategyContract.tokenA];
-            TokenMeta memory tokenMetaB = tokenMetaInfo[strategyContract.tokenB];
-            int latestTokenPriceA = getLatestPriceForToken(tokenMetaA);
-            int latestTokenPriceB = getLatestPriceForToken(tokenMetaB);
-            uint256 amountInUSD = allocationAmountPerTokenETH * uint(latestETHPrice);
-            
-            // Calculate desired amounts
-            uint amountADesired = amountInUSD / uint(latestTokenPriceA);
-            uint amountBDesired = amountInUSD / uint(latestTokenPriceB);
-            // For slippage
-            uint amountAMin = ((100 - slippageTolerancePercent)/100) * amountADesired;
-            uint amountBMin = ((100 - slippageTolerancePercent)/100) * amountBDesired;
-            (
-                uint amountANormal,
-                uint amountBNormal, 
-                uint liquidityNormal
-            ) = router.addLiquidity(strategyContract.tokenA, strategyContract.tokenB, amountADesired, amountBDesired, amountAMin, amountBMin, address(this), block.timestamp);
-            // Store liquidity token in ledger 
-            liquidityTokenLedger[msg.sender] += liquidityNormal;   
+        sharesTotal = sharesTotal.sub(sharesRemoved);
+
+        _unfarm(_lpTokenAmt);
+
+        uint256 lpTokenAmt = IERC20(wantAddress).balanceOf(address(this));
+        if (_lpTokenAmt > lpTokenAmt) {
+            _lpTokenAmt = lpTokenAmt;
         }
 
-        // Notify - TODO
-
-    }
-
-    function getLatestPriceForToken(TokenMeta memory tokenMeta) internal view returns (int) {
-        int priceA = getLatestPrice(tokenMeta.priceFeedA);
-        if (uint8(tokenMeta.priceCalculationMethod) == 0) {
-            return priceA;
-        } else if (uint8(tokenMeta.priceCalculationMethod) == 1) {
-            return 1/priceA;
-        } else if (uint8(tokenMeta.priceCalculationMethod) == 2) {
-            int priceB = getLatestPrice(tokenMeta.priceFeedB);  
-            return priceA * priceB;
-        } else if (uint8(tokenMeta.priceCalculationMethod) == 3) {
-            int priceB = getLatestPrice(tokenMeta.priceFeedB);  
-            return priceA / priceB;
+        if (lpTokensLockedTotal < _lpTokenAmt) {
+            _lpTokenAmt = lpTokensLockedTotal;
         }
-        
+
+        lpTokensLockedTotal = lpTokensLockedTotal.sub(_lpTokenAmt);
+
+        // Must have a way of verifying this is the correct recipient and is entitled to these funds
+        IERC20(pancakePairAddress).safeTransfer(msg.sender, _lpTokenAmt);
+
+        return sharesRemoved;
     }
 
-    function getLatestPrice(AggregatorV3Interface priceFeed) internal view returns (int) {
-        (
-            uint80 roundID, 
-            int price,
-            uint startedAt,
-            uint timeStamp,
-            uint80 answeredInRound
-        ) = priceFeed.latestRoundData();
-        return price;
-    }
+    // TODO - improve this explanation
+    // 1. Harvest farm tokens
+    // 2. Converts farm tokens into want tokens
+    // 3. Deposits want tokens
 
-    function withdraw() external {
-        // TODO
-    }
-
-    function takeProfit() external onlyOwner {
-        
-    }
-
-    function setCompoundingFrequency(uint16 minElapsedDays) external onlyOwner {
-        // Sets the max frequency of compounding (and thus profit-taking) to a value in days.
-        compoundingFrequencyDays = minElapsedDays;
-    }
-
-    function setZorroPerformanceFeePercent(uint8 feePct) external onlyOwner {
-        // Sets performance fee percentage to a new value.
-        require(feePct >= 0 && feePct <= 100, "Percent must be a value between 0 and 100.");
-        performanceFeePercent = feePct;
-    }
-
-    function changeOwner(address newOwner) external onlyOwner {
-        // Changes the owner of this contract
-        owner = newOwner;
-    }
-    
-    function setFeesReserve(uint256 reserveAmount) external onlyOwner {
-        reservesForFeesETH = reserveAmount;
-    }
-
-    function addLPContractToStrategy(address contractAddress, string calldata strategy, address tokenA, address tokenB, address priceFeedA1, address priceFeedA2, address priceFeedB1, address priceFeedB2, uint8 priceCalculationMethod) external onlyOwner {
-        // TODO - check to make sure there is a corresponding Chainlink oracle address
-        // Get current contracts associated with strategy provided
-        LPContract[] storage strategyContracts = lpContracts[strategy];
-        // Check to make sure contract doesn't already exist
-        for (uint16 i=0;i<strategyContracts.length;i++) {
-            if (strategyContracts[i].ammContractAddress == contractAddress) {
-                require(false, "Contract address already exists for this strategy");
-            }
+    function earn() public virtual nonReentrant whenNotPaused {
+        if (onlyGov) {
+            require(msg.sender == govAddress, "!gov");
         }
-        // Add contract
-        LPContract memory lpContract = LPContract(contractAddress, tokenA, tokenB);
-        strategyContracts.push(lpContract);
-        lpContracts[strategy] = strategyContracts;
-        // Add token metadata if applicable
-        // priceFeedA, priceFeedB, PriceCalculationMethod(priceCalculationMethod)
-        // Add Oracle if does not exist
-        addTokenMetadataIfNotExists(tokenA, priceFeedA1, priceFeedA2, PriceCalculationMethod(priceCalculationMethod));
-        addTokenMetadataIfNotExists(tokenB, priceFeedB1, priceFeedB2, PriceCalculationMethod(priceCalculationMethod));
-        // Notify
-        emit AddedContract(strategy, contractAddress, lpContracts[strategy].length);
-    }
 
-    function addTokenMetadataIfNotExists(address tokenAddress, address priceFeedA, address priceFeedB, PriceCalculationMethod priceCalculationMethod) internal {
-        if (!tokenMetaInfo[tokenAddress].initialized) {
-            tokenMetaInfo[tokenAddress] = TokenMeta(AggregatorV3Interface(priceFeedA), AggregatorV3Interface(priceFeedB), priceCalculationMethod, true);
+        // Harvest farm tokens
+        _unfarm(0);
+
+        // Converts farm tokens into want tokens
+        uint256 earnedCakeAmt = IERC20(cakeTokenAddress).balanceOf(address(this));
+
+        earnedCakeAmt = distributeFees(earnedCakeAmt);
+
+        IERC20(cakeTokenAddress).safeApprove(pancakeRouterAddress, 0);
+        IERC20(cakeTokenAddress).safeIncreaseAllowance(
+            pancakeRouterAddress,
+            earnedCakeAmt
+        );
+
+        if (cakeTokenAddress != token0Address) {
+            // Swap half earned to token0
+            _safeSwap(
+                pancakeRouterAddress,
+                earnedCakeAmt.div(2),
+                slippageFactor,
+                cakeToToken0Path,
+                address(this),
+                block.timestamp.add(600)
+            );
         }
+
+        if (cakeTokenAddress != token1Address) {
+            // Swap half earned to token1
+            _safeSwap(
+                pancakeRouterAddress,
+                earnedCakeAmt.div(2),
+                slippageFactor,
+                cakeToToken1Path,
+                address(this),
+                block.timestamp.add(600)
+            );
+        }
+
+        // Get want tokens, ie. add liquidity
+        uint256 token0Amt = IERC20(token0Address).balanceOf(address(this));
+        uint256 token1Amt = IERC20(token1Address).balanceOf(address(this));
+        if (token0Amt > 0 && token1Amt > 0) {
+            IERC20(token0Address).safeIncreaseAllowance(
+                pancakeRouterAddress,
+                token0Amt
+            );
+            IERC20(token1Address).safeIncreaseAllowance(
+                pancakeRouterAddress,
+                token1Amt
+            );
+            IPancakeRouter02(pancakeRouterAddress).addLiquidity(
+                token0Address,
+                token1Address,
+                token0Amt,
+                token1Amt,
+                0,
+                0,
+                address(this),
+                block.timestamp.add(600)
+            );
+        }
+
+        lastEarnBlock = block.number;
+
+        _farm();
     }
 
-    function removeLPContractFromStrategy(address contractAddress, string calldata strategy) external onlyOwner {
-        // Get current contracts associated with strategy provided
-        LPContract[] storage strategyContracts = lpContracts[strategy];
-        // Check to make sure contract exists
-        int16 matchingIndex = -1;
-        for (uint16 i=0;i<strategyContracts.length;i++) {
-            if (strategyContracts[i].ammContractAddress == contractAddress) {
-                matchingIndex = int16(i);
-                break;
+    function distributeFees(uint256 _earnedCakeAmt)
+        internal
+        virtual
+        returns (uint256)
+    {
+        if (_earnedAmt > 0) {
+            // Performance fee
+            if (controllerFee > 0) {
+                uint256 fee =
+                    _earnedCakeAmt.mul(controllerFee).div(controllerFeeMax);
+                IERC20(cakeTokenAddress).safeTransfer(rewardsAddress, fee);
+                _earnedCakeAmt = _earnedCakeAmt.sub(fee);
             }
         }
-        // If does not exist, revert
-        require(matchingIndex >= 0, "Matching contract address could not be found for this strategy");
-        // If does exist, remove contract and notify (Delete while preserving order)
-        for (uint16 i=0;i<strategyContracts.length-1;i++) {
-            strategyContracts[i] = strategyContracts[i+1];
-        }
-        strategyContracts.pop();
-        
-        // Modify contract state with shortened array and notify
-        lpContracts[strategy] = strategyContracts;
-        emit RemovedContract(strategy, contractAddress, lpContracts[strategy].length);
 
-        // TODO - remove tokenmetainfo for a removed token so long as it's not used by other contracts
+        return _earnedAmt;
     }
-    
-    fallback () external payable {
-        // TODO - fallback function. For accepting native currency from removeLiquidityETH.
+
+    function convertDustToEarned() public virtual whenNotPaused {
+        require(isAutoComp, "!isAutoComp");
+        require(!isCAKEStaking, "isCAKEStaking");
+
+        // Converts dust tokens into earned tokens, which will be reinvested on the next earn().
+        // https://www.coindesk.com/bitcoin-dust-tell-get-rid 
+
+        // Converts token0 dust (if any) to earned tokens
+        uint256 token0Amt = IERC20(token0Address).balanceOf(address(this));
+        if (token0Address != earnedAddress && token0Amt > 0) {
+            IERC20(token0Address).safeIncreaseAllowance(
+                pancakeRouterAddress,
+                token0Amt
+            );
+
+            // Swap all dust tokens to earned (CAKE) tokens
+            _safeSwap(
+                pancakeRouterAddress,
+                token0Amt,
+                slippageFactor,
+                token0ToCakePath,
+                address(this),
+                block.timestamp.add(600)
+            );
+        }
+
+        // Converts token1 dust (if any) to earned tokens
+        uint256 token1Amt = IERC20(token1Address).balanceOf(address(this));
+        if (token1Address != earnedAddress && token1Amt > 0) {
+            IERC20(token1Address).safeIncreaseAllowance(
+                pancakeRouterAddress,
+                token1Amt
+            );
+
+            // Swap all dust tokens to earned tokens
+            _safeSwap(
+                pancakeRouterAddress,
+                token1Amt,
+                slippageFactor,
+                token1ToCakePath,
+                address(this),
+                block.timestamp.add(600)
+            );
+        }
+    }
+
+    /* Maintenance */
+    function pause() public virtual onlyAllowGov {
+        _pause();
+    }
+
+    function unpause() public virtual onlyAllowGov {
+        _unpause();
+    }
+
+    function setSettings(
+        uint256 _entranceFeeFactor,
+        uint256 _controllerFee,
+        uint256 _slippageFactor
+    ) public virtual onlyAllowGov {
+        require(
+            _entranceFeeFactor >= entranceFeeFactorLL,
+            "_entranceFeeFactor too low"
+        );
+        require(
+            _entranceFeeFactor <= entranceFeeFactorMax,
+            "_entranceFeeFactor too high"
+        );
+        entranceFeeFactor = _entranceFeeFactor;
+
+        require(_controllerFee <= controllerFeeUL, "_controllerFee too high");
+        controllerFee = _controllerFee;
+
+        require(
+            _slippageFactor <= slippageFactorUL,
+            "_slippageFactor too high"
+        );
+        slippageFactor = _slippageFactor;
+
+        emit SetSettings(
+            _entranceFeeFactor,
+            _controllerFee,
+            _slippageFactor
+        );
+    }
+
+    function setGov(address _govAddress) public virtual onlyAllowGov {
+        govAddress = _govAddress;
+        emit SetGov(_govAddress);
+    }
+
+    function setOnlyGov(bool _onlyGov) public virtual onlyAllowGov {
+        onlyGov = _onlyGov;
+        emit SetOnlyGov(_onlyGov);
+    }
+
+    function setPancakeRouterAddress(address _pancakeRouterAddress)
+        public
+        virtual
+        onlyAllowGov
+    {
+        pancakeRouterAddress = _pancakeRouterAddress;
+        emit SetPancakeRouterAddress(_pancakeRouterAddress);
+    }
+
+    function setRewardsAddress(address _rewardsAddress)
+        public
+        virtual
+        onlyAllowGov
+    {
+        rewardsAddress = _rewardsAddress;
+        emit SetRewardsAddress(_rewardsAddress);
+    }
+
+    function inCaseTokensGetStuck(
+        address _token,
+        uint256 _amount,
+        address _to
+    ) public virtual onlyAllowGov {
+        require(_token != earnedCakeAddress, "!safe");
+        require(_token != pancakePairAddress, "!safe");
+        IERC20(_token).safeTransfer(_to, _amount);
+    }
+
+    function _wrapBNB() internal virtual {
+        // BNB -> WBNB
+        uint256 bnbBal = address(this).balance;
+        if (bnbBal > 0) {
+            IWBNB(wbnbAddress).deposit{value: bnbBal}(); // BNB -> WBNB
+        }
+    }
+
+    function wrapBNB() public virtual onlyAllowGov {
+        _wrapBNB();
+    }
+
+    function _safeSwap(
+        address _pancakeRouterAddress,
+        uint256 _amountIn,
+        uint256 _slippageFactor,
+        address[] memory _path,
+        address _to,
+        uint256 _deadline
+    ) internal virtual {
+        uint256[] memory amounts =
+            IPancakeRouter02(_pancakeRouterAddress).getAmountsOut(_amountIn, _path);
+        uint256 amountOut = amounts[amounts.length.sub(1)];
+
+        IPancakeRouter02(_pancakeRouterAddress)
+            .swapExactTokensForTokensSupportingFeeOnTransferTokens(
+            _amountIn,
+            amountOut.mul(_slippageFactor).div(1000),
+            _path,
+            _to,
+            _deadline
+        );
     }
 }
