@@ -43,7 +43,7 @@ interface IStrategy {
  *
  * _Available since v3.3._
  */
-contract TimelockController is AccessControl, ReentrancyGuard {
+contract ZorroTimelock is AccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     bytes32 public constant TIMELOCK_ADMIN_ROLE =
@@ -448,7 +448,9 @@ contract TimelockController is AccessControl, ReentrancyGuard {
      */
     function withdrawBNB() public payable {
         require(msg.sender == devWalletAddress, "!devWalletAddress");
-        devWalletAddress.safeTransfer(address(this).balance);
+        bool sent = devWalletAddress.send(address(this).balance);
+        require(sent, "Failed to withdrawBNB()");
+        devWalletAddress.transfer(address(this).balance);
     }
 
     function withdrawBEP20(address _tokenAddress) public payable {

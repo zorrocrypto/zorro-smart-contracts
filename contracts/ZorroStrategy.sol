@@ -20,19 +20,20 @@ interface IWBNB is IERC20 {
 import "./helpers/ReentrancyGuard.sol";
 import "./helpers/Pausable.sol";
 
-contract ZorroStrategy {
+contract ZorroStrategy is Ownable, ReentrancyGuard, Pausable {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
     // Constants
-    address public constant cakeTokenAddress = "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82";
-    address public constant pancakeRouterAddress = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
-    address public constant wbnbAddress = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
-    address public constant masterChefAddress = "0x73feaa1ee314f8c655e354234017be2193c9e24e";
+    // TODO - account for testnet vs mainnet 
+    address public constant cakeTokenAddress = 0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82;
+    address public constant wbnbAddress = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
+    address public constant masterChefAddress = 0x73feaa1eE314F8c655E354234017bE2193C9E24E;
 
     // Variables
     uint256 public pid; // pid of pool in masterChefAddress
     address public pancakePairAddress; // Used to be "wantAddress"
+    address public pancakeRouterAddress;
     address public token0Address;
     address public token1Address;
     // Ledger
@@ -51,7 +52,6 @@ contract ZorroStrategy {
     uint256 public constant controllerFeeUL = 5000; // (UL = "upper limit")
     address public rewardsAddress; // Where to send performance fees to
 
-    // TODO - understand front running and how AUTO do this better
     uint256 public entranceFeeFactor = 9990; // < 0.1% entrance fee - goes to pool + prevents front-running
     uint256 public constant entranceFeeFactorMax = 10000;
     uint256 public constant entranceFeeFactorLL = 9950; // 0.5% is the max entrance fee settable. LL = lowerlimit
@@ -68,7 +68,11 @@ contract ZorroStrategy {
 
     // Constructor
     constructor(
-        address[] memory _addresses,
+        address _govAddress,
+        address _pancakePairAddress,
+        address _token0Address,
+        address _token1Address,
+        address _rewardsAddress,
         uint256 _pid,
         address[] memory _cakeToToken0Path,
         address[] memory _cakeToToken1Path,
@@ -77,13 +81,11 @@ contract ZorroStrategy {
         uint256 _controllerFee,
         uint256 _entranceFeeFactor
     ) public {
-        wbnbAddress = _addresses[0];
-        govAddress = _addresses[1];
-        pancakePairAddress = _addresses[2];
-        token0Address = _addresses[3];
-        token1Address = _addresses[4];
-        pancakeRouterAddress = _addresses[5];
-        rewardsAddress = _addresses[6];
+        govAddress = _govAddress;
+        pancakePairAddress = _pancakePairAddress;
+        token0Address = _token0Address;
+        token1Address = _token1Address;
+        rewardsAddress = _rewardsAddress;
 
         pid = _pid;
 
@@ -93,8 +95,9 @@ contract ZorroStrategy {
         token1ToCakePath = _token1ToCakePath;
 
         controllerFee = _controllerFee;
-        buyBackRate = _buyBackRate;
         entranceFeeFactor = _entranceFeeFactor;
+
+        pancakeRouterAddress = 0x10ED43C718714eb63d5aA57B78B54704E256024E;
 
         transferOwnership(msg.sender);
     }
@@ -126,7 +129,7 @@ contract ZorroStrategy {
 
     function deposit(uint256 _lpTokenAmt) public nonReentrant {
         if (_lpTokenAmt > 0) {
-            uint256 sharesAdded = _deposit(msg.sender, _lpTokenAmt);
+            uint256 sharesAdded = _deposit(_lpTokenAmt);
             sharesLedger[msg.sender] = sharesLedger[msg.sender].add(sharesAdded);
         }
         emit Deposit(msg.sender, pid, _lpTokenAmt);
@@ -149,9 +152,8 @@ contract ZorroStrategy {
 
         // First depositor gets shares added equal to the number of LP tokens deposited
         uint256 sharesAdded = _lpTokenAmt;
-        // TODO need to understand better how the front running attack works and how the deposit fee helps
         // All subsequent depositors get shares added equal to the number of LP tokens
-        // deposited, minus entranceFee for security, paid to existing vault users
+        // deposited, minus entranceFee for protection against front-running, paid to existing vault users
         if (lpTokensLockedTotal > 0 && sharesTotal > 0) {
             sharesAdded = _lpTokenAmt
                 .mul(sharesTotal)
@@ -183,7 +185,7 @@ contract ZorroStrategy {
         IPancakeswapFarm(masterChefAddress).withdraw(pid, _lpTokenAmt);
     }
 
-    function withdraw(uint256 _pid, uint256 _lpTokenAmt) public nonReentrant {
+    function withdraw(uint256 _lpTokenAmt) public nonReentrant {
         require(sharesLedger[msg.sender] > 0, "user shares is 0");
         require(sharesTotal > 0, "sharesTotal is 0");
 
@@ -193,8 +195,7 @@ contract ZorroStrategy {
             _lpTokenAmt = amount;
         }
         if (_lpTokenAmt > 0) {
-            uint256 sharesRemoved = _withdraw(msg.sender, _lpTokenAmt);
-            // TODO - since we're updating state after the call above, is this vulnerable to reentrancy? Check for deposit() also.
+            uint256 sharesRemoved = _withdraw(_lpTokenAmt);
             if (sharesRemoved > sharesLedger[msg.sender]) {
                 sharesLedger[msg.sender] = 0;
             } else {
@@ -204,8 +205,7 @@ contract ZorroStrategy {
         emit Withdraw(msg.sender, pid, _lpTokenAmt);
     }
 
-    // TODO Check visibility of these functions (private vs. public) etc.
-    function _withdraw(address _userAddress, uint256 _lpTokenAmt)
+    function _withdraw(uint256 _lpTokenAmt)
         public
         virtual
         onlyOwner
@@ -222,7 +222,7 @@ contract ZorroStrategy {
 
         _unfarm(_lpTokenAmt);
 
-        uint256 lpTokenAmt = IERC20(wantAddress).balanceOf(address(this));
+        uint256 lpTokenAmt = IERC20(pancakePairAddress).balanceOf(address(this));
         if (_lpTokenAmt > lpTokenAmt) {
             _lpTokenAmt = lpTokenAmt;
         }
@@ -233,26 +233,23 @@ contract ZorroStrategy {
 
         lpTokensLockedTotal = lpTokensLockedTotal.sub(_lpTokenAmt);
 
-        // Must have a way of verifying this is the correct recipient and is entitled to these funds
         IERC20(pancakePairAddress).safeTransfer(msg.sender, _lpTokenAmt);
 
         return sharesRemoved;
     }
 
-    // TODO - improve this explanation
-    // 1. Harvest farm tokens
-    // 2. Converts farm tokens into want tokens
-    // 3. Deposits want tokens
-
+    // 1. Harvest cake tokens
+    // 2. Converts cake tokens into LP tokens
+    // 3. Deposits LP tokens
     function earn() public virtual nonReentrant whenNotPaused {
         if (onlyGov) {
             require(msg.sender == govAddress, "!gov");
         }
 
-        // Harvest farm tokens
+        // Harvest Cake tokens
         _unfarm(0);
 
-        // Converts farm tokens into want tokens
+        // Converts Cake tokens into LP tokens
         uint256 earnedCakeAmt = IERC20(cakeTokenAddress).balanceOf(address(this));
 
         earnedCakeAmt = distributeFees(earnedCakeAmt);
@@ -264,7 +261,7 @@ contract ZorroStrategy {
         );
 
         if (cakeTokenAddress != token0Address) {
-            // Swap half earned to token0
+            // Swap half earned Cake to token0
             _safeSwap(
                 pancakeRouterAddress,
                 earnedCakeAmt.div(2),
@@ -276,7 +273,7 @@ contract ZorroStrategy {
         }
 
         if (cakeTokenAddress != token1Address) {
-            // Swap half earned to token1
+            // Swap half earned Cake to token1
             _safeSwap(
                 pancakeRouterAddress,
                 earnedCakeAmt.div(2),
@@ -287,7 +284,7 @@ contract ZorroStrategy {
             );
         }
 
-        // Get want tokens, ie. add liquidity
+        // Get LP tokens, ie. add liquidity
         uint256 token0Amt = IERC20(token0Address).balanceOf(address(this));
         uint256 token1Amt = IERC20(token1Address).balanceOf(address(this));
         if (token0Amt > 0 && token1Amt > 0) {
@@ -321,7 +318,7 @@ contract ZorroStrategy {
         virtual
         returns (uint256)
     {
-        if (_earnedAmt > 0) {
+        if (_earnedCakeAmt > 0) {
             // Performance fee
             if (controllerFee > 0) {
                 uint256 fee =
@@ -331,19 +328,16 @@ contract ZorroStrategy {
             }
         }
 
-        return _earnedAmt;
+        return _earnedCakeAmt;
     }
 
     function convertDustToEarned() public virtual whenNotPaused {
-        require(isAutoComp, "!isAutoComp");
-        require(!isCAKEStaking, "isCAKEStaking");
-
         // Converts dust tokens into earned tokens, which will be reinvested on the next earn().
         // https://www.coindesk.com/bitcoin-dust-tell-get-rid 
 
         // Converts token0 dust (if any) to earned tokens
         uint256 token0Amt = IERC20(token0Address).balanceOf(address(this));
-        if (token0Address != earnedAddress && token0Amt > 0) {
+        if (token0Address != cakeTokenAddress && token0Amt > 0) {
             IERC20(token0Address).safeIncreaseAllowance(
                 pancakeRouterAddress,
                 token0Amt
@@ -362,7 +356,7 @@ contract ZorroStrategy {
 
         // Converts token1 dust (if any) to earned tokens
         uint256 token1Amt = IERC20(token1Address).balanceOf(address(this));
-        if (token1Address != earnedAddress && token1Amt > 0) {
+        if (token1Address != cakeTokenAddress && token1Amt > 0) {
             IERC20(token1Address).safeIncreaseAllowance(
                 pancakeRouterAddress,
                 token1Amt
@@ -453,7 +447,7 @@ contract ZorroStrategy {
         uint256 _amount,
         address _to
     ) public virtual onlyAllowGov {
-        require(_token != earnedCakeAddress, "!safe");
+        require(_token != cakeTokenAddress, "!safe");
         require(_token != pancakePairAddress, "!safe");
         IERC20(_token).safeTransfer(_to, _amount);
     }
